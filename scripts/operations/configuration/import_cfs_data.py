@@ -37,15 +37,18 @@ import sys
 from typing import Dict, Generator, List, NamedTuple, Union
 
 from python_lib import args, cfs
+from python_lib.cfs_import_export import CFS_RESOURCE_TYPES, list_cfs_components, \
+                                         remove_components_with_empty_ids
+from python_lib.common import print_err
 from python_lib.types import JsonDict, JSONDecodeError
 
 NameObjectMap = Dict[str,JsonDict]
 
-CMP_JSON = "components.json"
-CFG_JSON = "configurations.json"
-OPT_JSON = "options.json"
 CFS_EXPORT_TOOL = "/usr/share/doc/csm/scripts/operations/configuration/export_cfs_data.sh"
 
+CFG_JSON = CFS_RESOURCE_TYPES["configurations"].json_file_name
+CMP_JSON = CFS_RESOURCE_TYPES["components"].json_file_name
+OPT_JSON = CFS_RESOURCE_TYPES["options"].json_file_name
 
 class CfsData(NamedTuple):
     """
@@ -91,17 +94,6 @@ class CfsData(NamedTuple):
 class CfsError(Exception):
     pass
 
-def print_stderr(msg: str) -> None:
-    """
-    Outputs the specified message to stderr
-    """
-    sys.stderr.write(f"{msg}\n")
-
-def print_err(msg: str) -> None:
-    """
-    Prepends "ERROR: " and outputs the specified message to stderr
-    """
-    print_stderr(f"ERROR: {msg}")
 
 def snapshot_cfs_data() -> None:
     """
@@ -137,18 +129,36 @@ def json_data_from_directory(directory_string: str) -> CfsData:
     configs_file = args.readable_file(os.path.join(dirpath, CFG_JSON))
     options_file = args.readable_file(os.path.join(dirpath, OPT_JSON))
 
+    print("Reading CFS component data from JSON file")
+    cfs_component_list=remove_components_with_empty_ids(json_data_from_file(comps_file))
+
+    print("Reading CFS configuration data from JSON file")
+    cfs_config_list=json_data_from_file(configs_file)
+
+    print("Reading CFS option data from JSON file")
+    cfs_options_map=json_data_from_file(options_file)
+
     # Finally, read in their JSON data and return it
-    return CfsData.from_api(cfs_component_list=json_data_from_file(comps_file),
-                            cfs_config_list=json_data_from_file(configs_file),
-                            cfs_options_map=json_data_from_file(options_file))
+    return CfsData.from_api(cfs_component_list=cfs_component_list,
+                            cfs_config_list=cfs_config_list,
+                            cfs_options_map=cfs_options_map)
 
 def load_cfs_data() -> CfsData:
     """
     Make API calls to list the CFS components, configurations, and options on the live system.
     """
-    return CfsData.from_api(cfs_component_list=cfs.list_components(),
-                            cfs_config_list=cfs.list_configurations(),
-                            cfs_options_map=cfs.list_options())
+    print("Reading component data from CFS")
+    cfs_component_list=list_cfs_components()
+
+    print("Reading configuration data from CFS")
+    cfs_config_list=cfs.list_configurations()
+
+    print("Reading option data from CFS")
+    cfs_options_map=cfs.list_options()
+
+    return CfsData.from_api(cfs_component_list=cfs_component_list,
+                            cfs_config_list=cfs_config_list,
+                            cfs_options_map=cfs_options_map)
 
 def get_configs_to_create(configs_to_import: NameObjectMap,
                           current_configs: NameObjectMap) -> List[str]:
@@ -207,7 +217,7 @@ def get_comps_to_update(comps_to_import: NameObjectMap, current_comps: NameObjec
     # For these, we must then check if there is already a desired configuration set on the live
     # system.
     for comp_id in sorted(list(comps_to_import.keys() & current_comps.keys())):
-        imported_desired_config_name = comps_to_import[comp_id]["desiredConfig"]
+        imported_desired_config_name = comps_to_import[comp_id]["desired_config"]
         if not imported_desired_config_name:
             comps_no_desired_config.append(comp_id)
             continue
@@ -217,7 +227,7 @@ def get_comps_to_update(comps_to_import: NameObjectMap, current_comps: NameObjec
             print(f"Component {comp_id} will not be updated because its import data specifies"
                   f" a nonexistent desired configuration: '{imported_desired_config_name}'")
             continue
-        if current_comps[comp_id]["desiredConfig"]:
+        if current_comps[comp_id]["desired_config"]:
             comps_have_config_set.append(comp_id)
         else:
             comps_to_update.append(comp_id)
@@ -310,14 +320,14 @@ def update_components(comps_map: NameObjectMap, comp_ids_to_update: List[str]) -
     print("")
     comps_to_update_by_desired_config = {}
     for comp_id in comp_ids_to_update:
-        desired_config_name = comps_map[comp_id]["desiredConfig"]
+        desired_config_name = comps_map[comp_id]["desired_config"]
         if desired_config_name in comps_to_update_by_desired_config:
             comps_to_update_by_desired_config[desired_config_name].append(comp_id)
         else:
             comps_to_update_by_desired_config[desired_config_name] = [comp_id]
 
     for desired_config_name, comp_id_list in comps_to_update_by_desired_config.items():
-        update_data = { "desiredConfig": desired_config_name }
+        update_data = { "desired_config": desired_config_name }
         for comp_sublist in chunk_list(comp_id_list):
             print(f"Updating desired configuration to '{desired_config_name}' for components: {comp_sublist}")
             cfs.update_components_by_ids(comp_ids=comp_sublist, update_data=update_data)
@@ -353,11 +363,12 @@ def main() -> None:
             cfs.delete_configuration(config_name)
             del current_cfs_data.configurations[config_name]
 
-        comp_clear_data = {"errorCount": 0, "state": [], "desiredConfig": "", "tags": {}}
+        comp_clear_data = {"error_count": 0, "state": [], "desired_config": "", "tags": {}}
         for comp_sublist in chunk_list(list(current_cfs_data.components)):
             print(f"Clearing error count, desired configuration, state, and tags for components: '{comp_sublist}'")
-            updated_comps = cfs.update_components_by_ids(comp_ids=comp_sublist, update_data=comp_clear_data)
-            current_cfs_data.components.update({updated_comp["id"]: updated_comp for updated_comp in updated_comps})
+            updated_comp_ids = cfs.update_components_by_ids(comp_ids=comp_sublist, update_data=comp_clear_data)
+            for comp_id in updated_comp_ids:
+                current_cfs_data.components[comp_id].update(comp_clear_data)
 
     # Determine the necessary updates
     print("\nExamining CFS configurations...")
